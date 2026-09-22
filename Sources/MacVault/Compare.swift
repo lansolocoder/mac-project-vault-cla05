@@ -22,15 +22,15 @@ struct DiffEntry {
     let newSize: Int64?
 }
 
-private func utf8Precedes(_ a: String, _ b: String) -> Bool {
+func utf8Precedes(_ a: String, _ b: String) -> Bool {
     a.utf8.lexicographicallyPrecedes(b.utf8)
 }
 
-private func writeStderr(_ text: String) {
+func writeStderr(_ text: String) {
     FileHandle.standardError.write(Data(text.utf8))
 }
 
-private func normalizedRoot(_ path: String) -> String {
+func normalizedRoot(_ path: String) -> String {
     if let resolved = realpath(path, nil) {
         defer { free(resolved) }
         return String(cString: resolved)
@@ -53,7 +53,7 @@ private func relativePath(of url: URL, root: String) -> String {
 
 /// Recursively lists regular files below `root` without following symbolic
 /// links. Enumeration problems are appended to `errors`.
-private func enumerateRegularFiles(root: String, errors: inout [CompareError]) -> [String] {
+func enumerateRegularFiles(root: String, errors: inout [CompareError]) -> [String] {
     let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
     let rootURL = URL(fileURLWithPath: root)
     var enumerationErrors: [CompareError] = []
@@ -106,7 +106,7 @@ private func sameModificationTime(_ a: stat, _ b: stat) -> Bool {
 
 /// Hashes one regular file, verifying it stays a regular file with unchanged
 /// size and modification time across the read.
-private func hashFile(root: String, relativePath: String) -> Result<FileRecord, CompareError> {
+func hashFile(root: String, relativePath: String) -> Result<FileRecord, CompareError> {
     let fullPath = root == "/" ? "/" + relativePath : root + "/" + relativePath
 
     var before = stat()
@@ -152,7 +152,7 @@ private func hashFile(root: String, relativePath: String) -> Result<FileRecord, 
     return .success(FileRecord(path: relativePath, sha256: hex, size: before.st_size))
 }
 
-private func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEntry] {
+func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEntry] {
     let newByPath = Dictionary(uniqueKeysWithValues: newRecords.map { ($0.path, $0) })
     let oldPaths = Set(oldRecords.map(\.path))
 
@@ -214,7 +214,7 @@ private func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> 
     return entries
 }
 
-private func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
+func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
     entries.sorted { a, b in
         if let aPath = a.oldPath, let bPath = b.oldPath {
             if aPath != bPath { return utf8Precedes(aPath, bPath) }
@@ -230,7 +230,7 @@ private func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
     }
 }
 
-private func jsonEscape(_ string: String) -> String {
+func jsonEscape(_ string: String) -> String {
     var out = "\""
     for scalar in string.unicodeScalars {
         switch scalar {
@@ -267,7 +267,7 @@ private func renderEntry(_ entry: DiffEntry) -> String {
         + "}"
 }
 
-private func renderJSON(_ entries: [DiffEntry]) -> String {
+func renderJSON(_ entries: [DiffEntry]) -> String {
     guard !entries.isEmpty else { return "[]" }
     return "[" + entries.map(renderEntry).joined(separator: ",") + "]"
 }
