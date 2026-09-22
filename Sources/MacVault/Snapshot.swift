@@ -312,14 +312,69 @@ private func isValidSha256(_ value: String) -> Bool {
     value.unicodeScalars.count == 64 && value.unicodeScalars.allSatisfy { hexDigits.contains($0) }
 }
 
+/// Validates a UTC RFC3339 timestamp: `YYYY-MM-DDTHH:MM:SS` with an optional
+/// fractional second of at least one decimal digit, followed by `Z` or
+/// `+00:00`. Dates and time ranges must be real; non-UTC offsets, `-00:00`,
+/// and a missing timezone are invalid.
 private func isValidTimestamp(_ value: String) -> Bool {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(identifier: "UTC")
-    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
-    formatter.isLenient = false
-    guard let date = formatter.date(from: value) else { return false }
-    return formatter.string(from: date) == value
+    let bytes = Array(value.utf8)
+    var index = 0
+
+    func fixedDigits(_ count: Int) -> Int? {
+        var result = 0
+        for _ in 0..<count {
+            guard index < bytes.count, bytes[index] >= 0x30, bytes[index] <= 0x39
+            else { return nil }
+            result = result * 10 + Int(bytes[index] - 0x30)
+            index += 1
+        }
+        return result
+    }
+    func expect(_ byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else { return false }
+        index += 1
+        return true
+    }
+
+    guard let year = fixedDigits(4), expect(0x2D), // -
+          let month = fixedDigits(2), expect(0x2D), // -
+          let day = fixedDigits(2), expect(0x54), // T
+          let hour = fixedDigits(2), expect(0x3A), // :
+          let minute = fixedDigits(2), expect(0x3A), // :
+          let second = fixedDigits(2)
+    else { return false }
+
+    if index < bytes.count, bytes[index] == 0x2E { // .
+        index += 1
+        let fractionStart = index
+        while index < bytes.count, bytes[index] >= 0x30, bytes[index] <= 0x39 {
+            index += 1
+        }
+        guard index > fractionStart else { return false }
+    }
+
+    if index < bytes.count, bytes[index] == 0x5A { // Z
+        index += 1
+    } else if index < bytes.count, bytes[index] == 0x2B { // +
+        index += 1
+        guard expect(0x30), expect(0x30), expect(0x3A), // 00:
+              expect(0x30), expect(0x30) // 00
+        else { return false }
+    } else {
+        return false
+    }
+    guard index == bytes.count else { return false }
+
+    guard (1...12).contains(month),
+          (0...23).contains(hour),
+          (0...59).contains(minute),
+          (0...59).contains(second)
+    else { return false }
+
+    let isLeapYear = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    let daysInMonth = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30,
+                       31, 31, 30, 31, 30, 31]
+    return day >= 1 && day <= daysInMonth[month - 1]
 }
 
 private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
@@ -327,7 +382,10 @@ private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
         throw SnapshotDecodeError(message: "files must be an array")
     }
     var records: [FileRecord] = []
-    var seenPaths = Set<String>()
+    // Path identity is the raw UTF-8 byte sequence of the decoded string:
+    // no Unicode normalization or canonical-equivalence folding, so
+    // canonically equivalent but byte-different paths are distinct entries.
+    var seenPaths = Set<[UInt8]>()
     var previousPath: String?
     for item in items {
         guard case .object(let members) = item else {
@@ -352,13 +410,14 @@ private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
             throw SnapshotDecodeError(message: "file entry has an invalid size")
         }
 
-        if seenPaths.contains(path) {
+        let pathKey = Array(path.utf8)
+        if seenPaths.contains(pathKey) {
             throw SnapshotDecodeError(message: "duplicate path in files: \(path)")
         }
         if let previous = previousPath, !utf8Precedes(previous, path) {
             throw SnapshotDecodeError(message: "file entries are not sorted by path")
         }
-        seenPaths.insert(path)
+        seenPaths.insert(pathKey)
         previousPath = path
         records.append(FileRecord(path: path, sha256: sha256, size: size))
     }

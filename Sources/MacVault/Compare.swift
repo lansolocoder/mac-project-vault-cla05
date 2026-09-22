@@ -153,15 +153,18 @@ func hashFile(root: String, relativePath: String) -> Result<FileRecord, CompareE
 }
 
 func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEntry] {
-    let newByPath = Dictionary(uniqueKeysWithValues: newRecords.map { ($0.path, $0) })
-    let oldPaths = Set(oldRecords.map(\.path))
+    // Path identity is the raw UTF-8 byte sequence: no Unicode normalization
+    // or canonical-equivalence folding in lookup, matching, or moved dedup.
+    let newByPath = Dictionary(
+        uniqueKeysWithValues: newRecords.map { (Array($0.path.utf8), $0) })
+    let oldPaths = Set(oldRecords.map { Array($0.path.utf8) })
 
     var entries: [DiffEntry] = []
     var unmatchedOld: [FileRecord] = []
     var unmatchedNew: [FileRecord] = []
 
     for record in oldRecords {
-        if let match = newByPath[record.path] {
+        if let match = newByPath[Array(record.path.utf8)] {
             if match.sha256 != record.sha256 {
                 entries.append(DiffEntry(
                     kind: "modified",
@@ -173,7 +176,7 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
             unmatchedOld.append(record)
         }
     }
-    for record in newRecords where !oldPaths.contains(record.path) {
+    for record in newRecords where !oldPaths.contains(Array(record.path.utf8)) {
         unmatchedNew.append(record)
     }
 
@@ -182,8 +185,8 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
     var newByHash: [String: [FileRecord]] = [:]
     for record in unmatchedNew { newByHash[record.sha256, default: []].append(record) }
 
-    var movedOldPaths = Set<String>()
-    var movedNewPaths = Set<String>()
+    var movedOldPaths = Set<[UInt8]>()
+    var movedNewPaths = Set<[UInt8]>()
     for (hash, olds) in oldByHash where olds.count == 1 {
         guard let news = newByHash[hash], news.count == 1 else { continue }
         let old = olds[0]
@@ -193,18 +196,18 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
             oldPath: old.path, newPath: new.path,
             oldSha256: hash, newSha256: hash,
             oldSize: old.size, newSize: new.size))
-        movedOldPaths.insert(old.path)
-        movedNewPaths.insert(new.path)
+        movedOldPaths.insert(Array(old.path.utf8))
+        movedNewPaths.insert(Array(new.path.utf8))
     }
 
-    for record in unmatchedOld where !movedOldPaths.contains(record.path) {
+    for record in unmatchedOld where !movedOldPaths.contains(Array(record.path.utf8)) {
         entries.append(DiffEntry(
             kind: "removed",
             oldPath: record.path, newPath: nil,
             oldSha256: record.sha256, newSha256: nil,
             oldSize: record.size, newSize: nil))
     }
-    for record in unmatchedNew where !movedNewPaths.contains(record.path) {
+    for record in unmatchedNew where !movedNewPaths.contains(Array(record.path.utf8)) {
         entries.append(DiffEntry(
             kind: "added",
             oldPath: nil, newPath: record.path,
@@ -215,14 +218,18 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
 }
 
 func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
+    // Ordering is by raw UTF-8 bytes; canonically equivalent but
+    // byte-different paths are distinct and never compare equal here.
     entries.sorted { a, b in
         if let aPath = a.oldPath, let bPath = b.oldPath {
-            if aPath != bPath { return utf8Precedes(aPath, bPath) }
+            if utf8Precedes(aPath, bPath) { return true }
+            if utf8Precedes(bPath, aPath) { return false }
         } else if (a.oldPath == nil) != (b.oldPath == nil) {
             return a.oldPath != nil
         }
         if let aPath = a.newPath, let bPath = b.newPath {
-            if aPath != bPath { return utf8Precedes(aPath, bPath) }
+            if utf8Precedes(aPath, bPath) { return true }
+            if utf8Precedes(bPath, aPath) { return false }
         } else if (a.newPath == nil) != (b.newPath == nil) {
             return a.newPath != nil
         }
