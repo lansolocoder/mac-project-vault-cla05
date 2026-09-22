@@ -26,6 +26,13 @@ func utf8Precedes(_ a: String, _ b: String) -> Bool {
     a.utf8.lexicographicallyPrecedes(b.utf8)
 }
 
+/// Path identity is the raw UTF-8 byte sequence: Swift `String` equality and
+/// `Hashable` use canonical Unicode equivalence instead, so every path
+/// comparison that means "the exact same path bytes" must go through here.
+func utf8Identical(_ a: String, _ b: String) -> Bool {
+    a.utf8.elementsEqual(b.utf8)
+}
+
 func writeStderr(_ text: String) {
     FileHandle.standardError.write(Data(text.utf8))
 }
@@ -153,15 +160,17 @@ func hashFile(root: String, relativePath: String) -> Result<FileRecord, CompareE
 }
 
 func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEntry] {
-    let newByPath = Dictionary(uniqueKeysWithValues: newRecords.map { ($0.path, $0) })
-    let oldPaths = Set(oldRecords.map(\.path))
+    let newByPath = Dictionary(uniqueKeysWithValues: newRecords.map {
+        (Data($0.path.utf8), $0)
+    })
+    let oldPaths = Set(oldRecords.map { Data($0.path.utf8) })
 
     var entries: [DiffEntry] = []
     var unmatchedOld: [FileRecord] = []
     var unmatchedNew: [FileRecord] = []
 
     for record in oldRecords {
-        if let match = newByPath[record.path] {
+        if let match = newByPath[Data(record.path.utf8)] {
             if match.sha256 != record.sha256 {
                 entries.append(DiffEntry(
                     kind: "modified",
@@ -173,7 +182,7 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
             unmatchedOld.append(record)
         }
     }
-    for record in newRecords where !oldPaths.contains(record.path) {
+    for record in newRecords where !oldPaths.contains(Data(record.path.utf8)) {
         unmatchedNew.append(record)
     }
 
@@ -182,8 +191,8 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
     var newByHash: [String: [FileRecord]] = [:]
     for record in unmatchedNew { newByHash[record.sha256, default: []].append(record) }
 
-    var movedOldPaths = Set<String>()
-    var movedNewPaths = Set<String>()
+    var movedOldPaths = Set<Data>()
+    var movedNewPaths = Set<Data>()
     for (hash, olds) in oldByHash where olds.count == 1 {
         guard let news = newByHash[hash], news.count == 1 else { continue }
         let old = olds[0]
@@ -193,18 +202,18 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
             oldPath: old.path, newPath: new.path,
             oldSha256: hash, newSha256: hash,
             oldSize: old.size, newSize: new.size))
-        movedOldPaths.insert(old.path)
-        movedNewPaths.insert(new.path)
+        movedOldPaths.insert(Data(old.path.utf8))
+        movedNewPaths.insert(Data(new.path.utf8))
     }
 
-    for record in unmatchedOld where !movedOldPaths.contains(record.path) {
+    for record in unmatchedOld where !movedOldPaths.contains(Data(record.path.utf8)) {
         entries.append(DiffEntry(
             kind: "removed",
             oldPath: record.path, newPath: nil,
             oldSha256: record.sha256, newSha256: nil,
             oldSize: record.size, newSize: nil))
     }
-    for record in unmatchedNew where !movedNewPaths.contains(record.path) {
+    for record in unmatchedNew where !movedNewPaths.contains(Data(record.path.utf8)) {
         entries.append(DiffEntry(
             kind: "added",
             oldPath: nil, newPath: record.path,
@@ -217,12 +226,12 @@ func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEnt
 func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
     entries.sorted { a, b in
         if let aPath = a.oldPath, let bPath = b.oldPath {
-            if aPath != bPath { return utf8Precedes(aPath, bPath) }
+            if !utf8Identical(aPath, bPath) { return utf8Precedes(aPath, bPath) }
         } else if (a.oldPath == nil) != (b.oldPath == nil) {
             return a.oldPath != nil
         }
         if let aPath = a.newPath, let bPath = b.newPath {
-            if aPath != bPath { return utf8Precedes(aPath, bPath) }
+            if !utf8Identical(aPath, bPath) { return utf8Precedes(aPath, bPath) }
         } else if (a.newPath == nil) != (b.newPath == nil) {
             return a.newPath != nil
         }
@@ -318,7 +327,7 @@ func runCompare(oldPath: String, newPath: String) -> Int32 {
 
     guard errors.isEmpty else {
         let ordered = errors.enumerated().sorted { a, b in
-            a.element.path == b.element.path
+            utf8Identical(a.element.path, b.element.path)
                 ? a.offset < b.offset
                 : utf8Precedes(a.element.path, b.element.path)
         }

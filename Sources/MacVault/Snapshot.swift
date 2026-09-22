@@ -312,14 +312,96 @@ private func isValidSha256(_ value: String) -> Bool {
     value.unicodeScalars.count == 64 && value.unicodeScalars.allSatisfy { hexDigits.contains($0) }
 }
 
+/// Validates an RFC3339 timestamp in UTC:
+/// `YYYY-MM-DD'T'HH:mm:SS` optionally followed by one or more fractional
+/// digits after a dot, terminated by exactly `Z` or `+00:00`. The calendar
+/// date and wall-clock ranges are verified against the Gregorian calendar
+/// (so e.g. `2026-02-30` is rejected); `-00:00`, other offsets, and a
+/// missing zone are rejected.
 private func isValidTimestamp(_ value: String) -> Bool {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(identifier: "UTC")
-    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
-    formatter.isLenient = false
-    guard let date = formatter.date(from: value) else { return false }
-    return formatter.string(from: date) == value
+    let scalars = Array(value.unicodeScalars)
+
+    func digit(at index: Int) -> Int? {
+        guard index < scalars.count, case let s = scalars[index],
+              ("0"..."9").contains(s) else { return nil }
+        return Int(s.value - Unicode.Scalar("0").value)
+    }
+    func fixed(_ position: Int, _ count: Int) -> Int? {
+        var number = 0
+        for offset in 0..<count {
+            guard let d = digit(at: position + offset) else { return nil }
+            number = number * 10 + d
+        }
+        return number
+    }
+    func isScalar(_ character: Unicode.Scalar, at index: Int) -> Bool {
+        index < scalars.count && scalars[index] == character
+    }
+
+    // yyyy-MM-dd'T'HH:mm:ss — fixed positions through second 18.
+    guard scalars.count >= 20,
+          isScalar("-", at: 4), isScalar("-", at: 7), isScalar("T", at: 10),
+          isScalar(":", at: 13), isScalar(":", at: 16)
+    else {
+        return false
+    }
+    guard let year = fixed(0, 4),
+          let month = fixed(5, 2),
+          let day = fixed(8, 2),
+          let hour = fixed(11, 2),
+          let minute = fixed(14, 2),
+          let second = fixed(17, 2),
+          (1...12).contains(month), (1...31).contains(day),
+          (0...23).contains(hour),
+          (0...59).contains(minute), (0...59).contains(second)
+    else {
+        return false
+    }
+
+    // Optional fractional part: a dot followed by at least one digit.
+    var index = 19
+    if isScalar(".", at: index) {
+        index += 1
+        let fractionStart = index
+        while index < scalars.count, ("0"..."9").contains(scalars[index]) {
+            index += 1
+        }
+        guard index > fractionStart else { return false }
+    }
+
+    // Required UTC zone: exactly "Z" or "+00:00".
+    if isScalar("Z", at: index) {
+        index += 1
+    } else if isScalar("+", at: index),
+              isScalar("0", at: index + 1), isScalar("0", at: index + 2),
+              isScalar(":", at: index + 3),
+              isScalar("0", at: index + 4), isScalar("0", at: index + 5) {
+        index += 6
+    } else {
+        return false
+    }
+    guard index == scalars.count else { return false }
+
+    // Verify the date against the real Gregorian calendar by round-tripping
+    // the components (catches leap-year and impossible-day errors).
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    var components = DateComponents()
+    components.year = year
+    components.month = month
+    components.day = day
+    components.hour = hour
+    components.minute = minute
+    components.second = second
+    guard let date = calendar.date(from: components) else { return false }
+    let roundTrip = calendar.dateComponents(
+        [.year, .month, .day, .hour, .minute, .second], from: date)
+    return roundTrip.year == year
+        && roundTrip.month == month
+        && roundTrip.day == day
+        && roundTrip.hour == hour
+        && roundTrip.minute == minute
+        && roundTrip.second == second
 }
 
 private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
@@ -327,7 +409,7 @@ private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
         throw SnapshotDecodeError(message: "files must be an array")
     }
     var records: [FileRecord] = []
-    var seenPaths = Set<String>()
+    var seenPaths = Set<Data>()
     var previousPath: String?
     for item in items {
         guard case .object(let members) = item else {
@@ -352,13 +434,14 @@ private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
             throw SnapshotDecodeError(message: "file entry has an invalid size")
         }
 
-        if seenPaths.contains(path) {
+        let pathBytes = Data(path.utf8)
+        if seenPaths.contains(pathBytes) {
             throw SnapshotDecodeError(message: "duplicate path in files: \(path)")
         }
         if let previous = previousPath, !utf8Precedes(previous, path) {
             throw SnapshotDecodeError(message: "file entries are not sorted by path")
         }
-        seenPaths.insert(path)
+        seenPaths.insert(pathBytes)
         previousPath = path
         records.append(FileRecord(path: path, sha256: sha256, size: size))
     }
@@ -415,7 +498,7 @@ private func renderSnapshot(records: [FileRecord], capturedAt: String) -> String
 
 private func reportCollectionErrors(_ errors: [CompareError]) {
     let ordered = errors.enumerated().sorted { a, b in
-        a.element.path == b.element.path
+        utf8Identical(a.element.path, b.element.path)
             ? a.offset < b.offset
             : utf8Precedes(a.element.path, b.element.path)
     }
