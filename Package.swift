@@ -8,6 +8,11 @@ let package = Package(
         .executable(name: "macvault", targets: ["MacVault"])
     ],
     targets: [
-        .executableTarget(name: "MacVault")
+        .executableTarget(
+            name: "MacVault",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
+        )
     ]
 )
