@@ -9,6 +9,8 @@ swift build
 .build/debug/macvault --help
 .build/debug/macvault --version
 .build/debug/macvault compare OLD NEW
+.build/debug/macvault history-add ROOT P V SNAPSHOT
+.build/debug/macvault history-query ROOT [P [V [PATH]]]
 .build/debug/macvault snapshot SOURCE SNAPSHOT
 .build/debug/macvault snapshot-diff SNAPSHOT CURRENT
 ```
@@ -40,6 +42,46 @@ UTF-8 byte order. Identical directories produce `[]`.
 If any file is unreadable, vanishes, or changes size or modification time
 while being read, stdout stays empty, the affected paths are reported to
 stderr in stable path order, and the exit status is 74.
+
+## `macvault history-add ROOT P V SNAPSHOT`
+
+Registers `SNAPSHOT` in the history store rooted at `ROOT` under project `P`
+and version `V`. `P` and `V` must be single path segments that the snapshot
+path rules allow (non-empty, no `/`, not `.`/`..`, no NUL bytes); invalid
+arguments exit with status 64, as does a `ROOT` that exists but is not a
+directory. `SNAPSHOT` is decoded with the same strict validation as
+`snapshot-diff`; an unreadable or invalid snapshot exits with status 65.
+
+The record stores `P`, `V`, the snapshot's absolute path, the SHA-256 of its
+bytes, and its file manifest. A missing or empty `ROOT` is initialized first:
+the marker `ROOT/history.json` is published with exactly the structure
+`{"version":1}`. A non-empty `ROOT` without that marker, or with a marker of
+any other structure, is corrupt and exits with status 65.
+
+Records are staged inside `ROOT` and published atomically, so concurrent
+registrations of the same `P`/`V` key let exactly one value win. Re-adding an
+identical registration (same `P`/`V`, snapshot path, and hash) is an
+idempotent success; the same key with a different path or hash reports an
+error and exits with status 73, leaving no new record behind. I/O failures
+exit with status 74. On every failure stdout stays empty, an error is written
+to stderr, the store is not modified, and staging files are removed.
+
+## `macvault history-query ROOT [P [V [PATH]]]`
+
+Prints the records in the history store `ROOT` that match the optional
+filters as a single JSON array on stdout: `P` restricts to one project, `V`
+to one version, and `PATH` (a snapshot-relative path) to versions whose
+manifest contains that path. The command is read-only: a missing or empty
+`ROOT` prints `[]`, exits 0, and creates nothing. A `ROOT` that is not a
+directory exits 64; a corrupt store (missing or invalid marker, undecodable
+record) exits 65; I/O failures exit 74.
+
+Each array item has exactly the keys `project`, `version`, `snapshotPath`,
+`snapshotSha256`, `snapshotStatus`, and `files`, where `files` are the
+snapshot's own entries. `snapshotStatus` re-hashes the registered snapshot
+file: `intact` when the bytes still match, `modified` when they differ, and
+`missing` when the file is gone. Items are sorted by `project` then `version`
+and files by `path`, all in UTF-8 byte order. No matches print `[]`.
 
 ## `macvault snapshot SOURCE SNAPSHOT`
 

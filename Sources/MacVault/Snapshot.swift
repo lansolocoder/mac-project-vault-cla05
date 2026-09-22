@@ -14,16 +14,21 @@ struct SnapshotDecodeError: Error {
 // so the snapshot format is validated with this small grammar-faithful
 // parser instead.
 
+struct JSONObjectMember {
+    let key: String
+    let value: JSONValue
+}
+
 enum JSONValue {
     case null
     case bool(Bool)
     case number(String)                    // raw lexeme; grammar already validated
     case string(String)
     case array([JSONValue])
-    case object([(String, JSONValue)])     // preserves member order and duplicates
+    case object([JSONObjectMember])        // preserves member order and duplicates
 }
 
-private struct JSONParser {
+struct JSONParser {
     private let scalars: [Unicode.Scalar]
     private var index = 0
 
@@ -92,9 +97,9 @@ private struct JSONParser {
         return .bool(false)
     }
 
-    private mutating func parseObject() throws -> [(String, JSONValue)] {
+    private mutating func parseObject() throws -> [JSONObjectMember] {
         index += 1 // "{"
-        var members: [(String, JSONValue)] = []
+        var members: [JSONObjectMember] = []
         skipWhitespace()
         if !atEnd, current == "}" {
             index += 1
@@ -112,7 +117,7 @@ private struct JSONParser {
             }
             index += 1
             let value = try parseValue()
-            members.append((key, value))
+            members.append(JSONObjectMember(key: key, value: value))
             skipWhitespace()
             if atEnd { throw SnapshotDecodeError(message: "unterminated object") }
             switch current {
@@ -289,7 +294,7 @@ private let hexDigits = Set("0123456789abcdef".unicodeScalars)
 /// or trailing slash, no empty/`.`/`..` segments, no NUL bytes. Backslashes
 /// are ordinary characters and Unicode is compared by code points without
 /// normalization.
-private func isValidRelativePath(_ path: String) -> Bool {
+func isValidRelativePath(_ path: String) -> Bool {
     let scalars = path.unicodeScalars
     guard let first = scalars.first, let last = scalars.last else { return false }
     guard first != "/", last != "/" else { return false }
@@ -308,7 +313,7 @@ private func isValidRelativePath(_ path: String) -> Bool {
     return String(segment) != "." && String(segment) != ".."
 }
 
-private func isValidSha256(_ value: String) -> Bool {
+func isValidSha256(_ value: String) -> Bool {
     value.unicodeScalars.count == 64 && value.unicodeScalars.allSatisfy { hexDigits.contains($0) }
 }
 
@@ -404,7 +409,7 @@ private func isValidTimestamp(_ value: String) -> Bool {
         && roundTrip.second == second
 }
 
-private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
+func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
     guard case .array(let items) = value else {
         throw SnapshotDecodeError(message: "files must be an array")
     }
@@ -415,11 +420,11 @@ private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
         guard case .object(let members) = item else {
             throw SnapshotDecodeError(message: "each file entry must be an object")
         }
-        let keys = Set(members.map { $0.0 })
+        let keys = Set(members.map { $0.key })
         guard members.count == 3, keys == ["path", "sha256", "size"] else {
             throw SnapshotDecodeError(message: "file entry has missing or extra fields")
         }
-        let fields = Dictionary(members, uniquingKeysWith: { $1 })
+        let fields = Dictionary(uniqueKeysWithValues: members.map { ($0.key, $0.value) })
 
         guard case .string(let path) = fields["path"], isValidRelativePath(path) else {
             throw SnapshotDecodeError(message: "file entry has an invalid path")
@@ -450,7 +455,7 @@ private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
 
 /// Parses and strictly validates a snapshot, returning its file records.
 /// Never repairs the file; any problem throws `SnapshotDecodeError`.
-private func decodeSnapshot(_ data: Data) throws -> [FileRecord] {
+func decodeSnapshot(_ data: Data) throws -> [FileRecord] {
     guard let text = String(data: data, encoding: .utf8) else {
         throw SnapshotDecodeError(message: "snapshot is not valid UTF-8")
     }
@@ -458,11 +463,11 @@ private func decodeSnapshot(_ data: Data) throws -> [FileRecord] {
     guard case .object(let members) = value else {
         throw SnapshotDecodeError(message: "snapshot root must be an object")
     }
-    let keys = Set(members.map { $0.0 })
+    let keys = Set(members.map { $0.key })
     guard members.count == 3, keys == ["version", "capturedAt", "files"] else {
         throw SnapshotDecodeError(message: "snapshot has missing or extra fields")
     }
-    let fields = Dictionary(members, uniquingKeysWith: { $1 })
+    let fields = Dictionary(uniqueKeysWithValues: members.map { ($0.key, $0.value) })
 
     guard case .number(let versionLexeme) = fields["version"], versionLexeme == "1" else {
         throw SnapshotDecodeError(message: "unsupported snapshot version")
@@ -516,7 +521,7 @@ private func isPath(_ path: String, inside ancestor: String) -> Bool {
         && Array(pathComponents.prefix(ancestorComponents.count)) == ancestorComponents
 }
 
-private enum PublishError: Error {
+enum PublishError: Error {
     case destinationExists
     case io(String)
 }
@@ -525,7 +530,7 @@ private enum PublishError: Error {
 /// publishes it with `link(2)`, which fails with EEXIST instead of ever
 /// overwriting an existing destination. The staging file is removed on every
 /// failure path.
-private func publishSnapshot(json: String, to snapshotPath: String) throws {
+func publishSnapshot(json: String, to snapshotPath: String) throws {
     let bytes = Data(json.utf8)
     let snapshotURL = URL(fileURLWithPath: snapshotPath)
     let parentPath = normalizedRoot(snapshotURL.deletingLastPathComponent().path)
