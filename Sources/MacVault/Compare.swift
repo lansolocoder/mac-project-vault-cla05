@@ -22,15 +22,15 @@ struct DiffEntry {
     let newSize: Int64?
 }
 
-private func utf8Precedes(_ a: String, _ b: String) -> Bool {
+func utf8Precedes(_ a: String, _ b: String) -> Bool {
     a.utf8.lexicographicallyPrecedes(b.utf8)
 }
 
-private func writeStderr(_ text: String) {
+func writeStderr(_ text: String) {
     FileHandle.standardError.write(Data(text.utf8))
 }
 
-private func normalizedRoot(_ path: String) -> String {
+func normalizedRoot(_ path: String) -> String {
     if let resolved = realpath(path, nil) {
         defer { free(resolved) }
         return String(cString: resolved)
@@ -42,7 +42,7 @@ private func normalizedRoot(_ path: String) -> String {
     return fallback
 }
 
-private func relativePath(of url: URL, root: String) -> String {
+func relativePath(of url: URL, root: String) -> String {
     let path = url.path
     let prefix = root == "/" ? "/" : root + "/"
     if path.hasPrefix(prefix) {
@@ -53,7 +53,7 @@ private func relativePath(of url: URL, root: String) -> String {
 
 /// Recursively lists regular files below `root` without following symbolic
 /// links. Enumeration problems are appended to `errors`.
-private func enumerateRegularFiles(root: String, errors: inout [CompareError]) -> [String] {
+func enumerateRegularFiles(root: String, errors: inout [CompareError]) -> [String] {
     let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
     let rootURL = URL(fileURLWithPath: root)
     var enumerationErrors: [CompareError] = []
@@ -95,18 +95,18 @@ private func enumerateRegularFiles(root: String, errors: inout [CompareError]) -
     return files
 }
 
-private func isRegularFile(_ status: stat) -> Bool {
+func isRegularFile(_ status: stat) -> Bool {
     status.st_mode & S_IFMT == S_IFREG
 }
 
-private func sameModificationTime(_ a: stat, _ b: stat) -> Bool {
+func sameModificationTime(_ a: stat, _ b: stat) -> Bool {
     a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec
         && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec
 }
 
 /// Hashes one regular file, verifying it stays a regular file with unchanged
 /// size and modification time across the read.
-private func hashFile(root: String, relativePath: String) -> Result<FileRecord, CompareError> {
+func hashFile(root: String, relativePath: String) -> Result<FileRecord, CompareError> {
     let fullPath = root == "/" ? "/" + relativePath : root + "/" + relativePath
 
     var before = stat()
@@ -152,7 +152,7 @@ private func hashFile(root: String, relativePath: String) -> Result<FileRecord, 
     return .success(FileRecord(path: relativePath, sha256: hex, size: before.st_size))
 }
 
-private func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEntry] {
+func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> [DiffEntry] {
     let newByPath = Dictionary(uniqueKeysWithValues: newRecords.map { ($0.path, $0) })
     let oldPaths = Set(oldRecords.map(\.path))
 
@@ -214,7 +214,7 @@ private func computeDiff(oldRecords: [FileRecord], newRecords: [FileRecord]) -> 
     return entries
 }
 
-private func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
+func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
     entries.sorted { a, b in
         if let aPath = a.oldPath, let bPath = b.oldPath {
             if aPath != bPath { return utf8Precedes(aPath, bPath) }
@@ -230,7 +230,7 @@ private func sortEntries(_ entries: [DiffEntry]) -> [DiffEntry] {
     }
 }
 
-private func jsonEscape(_ string: String) -> String {
+func jsonEscape(_ string: String) -> String {
     var out = "\""
     for scalar in string.unicodeScalars {
         switch scalar {
@@ -253,7 +253,7 @@ private func jsonEscape(_ string: String) -> String {
     return out
 }
 
-private func renderEntry(_ entry: DiffEntry) -> String {
+func renderEntry(_ entry: DiffEntry) -> String {
     func field(_ value: String?) -> String { value.map(jsonEscape) ?? "null" }
     func field(_ value: Int64?) -> String { value.map(String.init) ?? "null" }
     return "{"
@@ -267,9 +267,41 @@ private func renderEntry(_ entry: DiffEntry) -> String {
         + "}"
 }
 
-private func renderJSON(_ entries: [DiffEntry]) -> String {
+func renderJSON(_ entries: [DiffEntry]) -> String {
     guard !entries.isEmpty else { return "[]" }
     return "[" + entries.map(renderEntry).joined(separator: ",") + "]"
+}
+
+/// Enumerates and hashes every regular file below `root`, returning records
+/// in UTF-8 path order along with any problems found.
+func collectRecords(root: String) -> (records: [FileRecord], errors: [CompareError]) {
+    var errors: [CompareError] = []
+    let files = enumerateRegularFiles(root: root, errors: &errors)
+    var records: [FileRecord] = []
+    for relative in files.sorted(by: utf8Precedes) {
+        switch hashFile(root: root, relativePath: relative) {
+        case .success(let record): records.append(record)
+        case .failure(let error): errors.append(error)
+        }
+    }
+    return (records, errors)
+}
+
+/// Writes collection errors to stderr in stable path order and returns true
+/// when there were none.
+func emitCollectionErrors(_ errors: [CompareError]) -> Bool {
+    guard !errors.isEmpty else { return false }
+    let ordered = errors.enumerated().sorted { a, b in
+        a.element.path == b.element.path
+            ? a.offset < b.offset
+            : utf8Precedes(a.element.path, b.element.path)
+    }
+    var text = ""
+    for error in ordered {
+        text += "error: \(error.element.path): \(error.element.message)\n"
+    }
+    writeStderr(text)
+    return true
 }
 
 func runCompare(oldPath: String, newPath: String) -> Int32 {
@@ -297,39 +329,15 @@ func runCompare(oldPath: String, newPath: String) -> Int32 {
         return 64
     }
 
-    var errors: [CompareError] = []
-    let oldFiles = enumerateRegularFiles(root: oldRoot, errors: &errors)
-    let newFiles = enumerateRegularFiles(root: newRoot, errors: &errors)
+    let oldCollected = collectRecords(root: oldRoot)
+    let newCollected = collectRecords(root: newRoot)
 
-    var oldRecords: [FileRecord] = []
-    for relative in oldFiles.sorted(by: utf8Precedes) {
-        switch hashFile(root: oldRoot, relativePath: relative) {
-        case .success(let record): oldRecords.append(record)
-        case .failure(let error): errors.append(error)
-        }
-    }
-    var newRecords: [FileRecord] = []
-    for relative in newFiles.sorted(by: utf8Precedes) {
-        switch hashFile(root: newRoot, relativePath: relative) {
-        case .success(let record): newRecords.append(record)
-        case .failure(let error): errors.append(error)
-        }
-    }
-
-    guard errors.isEmpty else {
-        let ordered = errors.enumerated().sorted { a, b in
-            a.element.path == b.element.path
-                ? a.offset < b.offset
-                : utf8Precedes(a.element.path, b.element.path)
-        }
-        var text = ""
-        for error in ordered {
-            text += "error: \(error.element.path): \(error.element.message)\n"
-        }
-        writeStderr(text)
+    if emitCollectionErrors(oldCollected.errors + newCollected.errors) {
         return 74
     }
 
-    print(renderJSON(sortEntries(computeDiff(oldRecords: oldRecords, newRecords: newRecords))))
+    print(renderJSON(sortEntries(computeDiff(
+        oldRecords: oldCollected.records,
+        newRecords: newCollected.records))))
     return 0
 }
