@@ -7,6 +7,8 @@ Usage: macvault [--help | --version]
        macvault compare OLD NEW
        macvault snapshot SOURCE SNAPSHOT
        macvault snapshot-diff SNAPSHOT CURRENT
+       macvault history-add ROOT P V SNAPSHOT
+       macvault history-query ROOT [P [V [PATH]]]
 
 Commands:
   compare OLD NEW              Recursively compare two directories read-only
@@ -18,6 +20,14 @@ Commands:
                                directory read-only and print differences as a
                                JSON array, using the same semantics as
                                compare.
+  history-add ROOT P V SNAPSHOT
+                               Strictly decode SNAPSHOT and register it in the
+                               history rooted at ROOT under project P and
+                               version V, initializing ROOT if needed.
+  history-query ROOT [P [V [PATH]]]
+                               Print the registered history as a JSON array,
+                               optionally filtered by project, version, and a
+                               contained file path. Read-only.
 
 Options:
   -h, --help   Show this help.
@@ -36,6 +46,22 @@ if arguments.count == 3, arguments[0] == "snapshot" {
 
 if arguments.count == 3, arguments[0] == "snapshot-diff" {
     exit(runSnapshotDiff(snapshotPath: arguments[1], currentPath: arguments[2]))
+}
+
+if arguments.count == 5, arguments[0] == "history-add" {
+    exit(runHistoryAdd(
+        root: arguments[1],
+        project: arguments[2],
+        version: arguments[3],
+        snapshotPath: arguments[4]))
+}
+
+if arguments.count >= 2, arguments.count <= 5, arguments[0] == "history-query" {
+    exit(runHistoryQuery(
+        root: arguments[1],
+        project: arguments.count > 2 ? arguments[2] : nil,
+        version: arguments.count > 3 ? arguments[3] : nil,
+        path: arguments.count > 4 ? arguments[4] : nil))
 }
 
 switch arguments {

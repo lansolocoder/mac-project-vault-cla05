@@ -11,6 +11,8 @@ swift build
 .build/debug/macvault compare OLD NEW
 .build/debug/macvault snapshot SOURCE SNAPSHOT
 .build/debug/macvault snapshot-diff SNAPSHOT CURRENT
+.build/debug/macvault history-add ROOT P V SNAPSHOT
+.build/debug/macvault history-query ROOT [P [V [PATH]]]
 ```
 
 No arguments or `-h`/`--help` display help; `--version` prints the version.
@@ -86,3 +88,40 @@ out-of-order paths, invalid hashes or sizes — produces no stdout output, an
 error on stderr, and exit status 65. The snapshot is never repaired. Failure
 while collecting `CURRENT` reports the affected paths and exits with status
 74.
+
+## `macvault history-add ROOT P V SNAPSHOT`
+
+Registers `SNAPSHOT` in the history rooted at `ROOT` under project `P` and
+version `V`. `P` and `V` must be single path segments that satisfy the
+snapshot path rules; identification and ordering use raw UTF-8 bytes. The
+snapshot is strictly decoded with the same rules as `snapshot-diff`
+(invalid snapshots exit 65), and the record stores `P`, `V`, the snapshot's
+absolute path, the SHA-256 of its bytes, and the file manifest.
+
+A missing or empty `ROOT` is initialized on demand: a marker file
+`ROOT/history.json` containing exactly `{"version":1}` is published and
+records are kept under `ROOT/records/`. A non-empty `ROOT` without the
+marker, or with a marker that is not exactly that structure, is corrupt and
+exits 65; a `ROOT` that exists but is not a directory exits 64.
+
+If a record for the same `P`/`V` already exists with the same snapshot path
+and hash, the add is idempotent and succeeds; a different path or hash exits
+73. Records are staged inside `ROOT` and published atomically, so concurrent
+adds for the same key let exactly one value win and a failed add leaves no
+new record behind. I/O failures exit 74; on every failure stdout stays
+empty, an error goes to stderr, and staging files are removed.
+
+## `macvault history-query ROOT [P [V [PATH]]]`
+
+Prints the registered history as a single JSON array on stdout, read-only. A
+missing or empty `ROOT` prints `[]`, exits 0, and creates nothing. The
+optional filters select a project `P`, a version `V`, and — with `PATH`, a
+snapshot relative path — only versions whose manifest contains that path.
+
+Each array item has exactly the keys `project`, `version`, `snapshotPath`,
+`snapshotSha256`, `snapshotStatus`, and `files` (the snapshot entries).
+Records are ordered by project and version, files by path, all in UTF-8 byte
+order. `snapshotStatus` is `intact`, `modified`, or `missing`, depending on
+whether the snapshot file still exists with the recorded hash. No matches
+print `[]`. Invalid arguments exit 64, corrupt `ROOT` state exits 65, and
+I/O failures exit 74.

@@ -23,7 +23,7 @@ enum JSONValue {
     case object([(String, JSONValue)])     // preserves member order and duplicates
 }
 
-private struct JSONParser {
+struct JSONParser {
     private let scalars: [Unicode.Scalar]
     private var index = 0
 
@@ -289,7 +289,7 @@ private let hexDigits = Set("0123456789abcdef".unicodeScalars)
 /// or trailing slash, no empty/`.`/`..` segments, no NUL bytes. Backslashes
 /// are ordinary characters and Unicode is compared by code points without
 /// normalization.
-private func isValidRelativePath(_ path: String) -> Bool {
+func isValidRelativePath(_ path: String) -> Bool {
     let scalars = path.unicodeScalars
     guard let first = scalars.first, let last = scalars.last else { return false }
     guard first != "/", last != "/" else { return false }
@@ -308,7 +308,7 @@ private func isValidRelativePath(_ path: String) -> Bool {
     return String(segment) != "." && String(segment) != ".."
 }
 
-private func isValidSha256(_ value: String) -> Bool {
+func isValidSha256(_ value: String) -> Bool {
     value.unicodeScalars.count == 64 && value.unicodeScalars.allSatisfy { hexDigits.contains($0) }
 }
 
@@ -404,7 +404,7 @@ private func isValidTimestamp(_ value: String) -> Bool {
         && roundTrip.second == second
 }
 
-private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
+func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
     guard case .array(let items) = value else {
         throw SnapshotDecodeError(message: "files must be an array")
     }
@@ -450,7 +450,7 @@ private func decodeFiles(_ value: JSONValue) throws -> [FileRecord] {
 
 /// Parses and strictly validates a snapshot, returning its file records.
 /// Never repairs the file; any problem throws `SnapshotDecodeError`.
-private func decodeSnapshot(_ data: Data) throws -> [FileRecord] {
+func decodeSnapshot(_ data: Data) throws -> [FileRecord] {
     guard let text = String(data: data, encoding: .utf8) else {
         throw SnapshotDecodeError(message: "snapshot is not valid UTF-8")
     }
@@ -471,6 +471,75 @@ private func decodeSnapshot(_ data: Data) throws -> [FileRecord] {
         throw SnapshotDecodeError(message: "invalid capturedAt timestamp")
     }
     return try decodeFiles(fields["files"]!)
+}
+
+// MARK: - History record decoding
+//
+// All JSONValue manipulation stays in this file: pattern-matching the
+// recursive enum's tuple payloads across file boundaries trips a circular
+// reference error in Swift 6 language mode.
+
+/// P and V must be single path segments that satisfy the snapshot path
+/// rules: non-empty, no `/`, no NUL, not `.` or `..`.
+func isValidHistorySegment(_ value: String) -> Bool {
+    isValidRelativePath(value) && !value.contains("/")
+}
+
+/// Validates the history marker structure: exactly {"version":1}, a
+/// single-member object mapping "version" to the number 1.
+func decodeHistoryMarker(_ data: Data) throws {
+    guard let text = String(data: data, encoding: .utf8) else {
+        throw SnapshotDecodeError(message: "marker is not valid UTF-8")
+    }
+    let value = try JSONParser.parse(text)
+    guard case .object(let members) = value, members.count == 1,
+          members[0].0 == "version",
+          case .number(let lexeme) = members[0].1, lexeme == "1"
+    else {
+        throw SnapshotDecodeError(message: "marker must be exactly {\"version\":1}")
+    }
+}
+
+/// Parses and strictly validates one history record file. Never repairs the
+/// file; any problem throws `SnapshotDecodeError`.
+func decodeHistoryRecord(_ data: Data) throws -> HistoryRecord {
+    guard let text = String(data: data, encoding: .utf8) else {
+        throw SnapshotDecodeError(message: "record is not valid UTF-8")
+    }
+    let value = try JSONParser.parse(text)
+    guard case .object(let members) = value else {
+        throw SnapshotDecodeError(message: "record root must be an object")
+    }
+    let keys = Set(members.map { $0.0 })
+    guard members.count == 5,
+          keys == ["project", "version", "snapshotPath", "snapshotSha256", "files"]
+    else {
+        throw SnapshotDecodeError(message: "record has missing or extra fields")
+    }
+    let fields = Dictionary(members, uniquingKeysWith: { $1 })
+
+    guard case .string(let project) = fields["project"], isValidHistorySegment(project) else {
+        throw SnapshotDecodeError(message: "record has an invalid project")
+    }
+    guard case .string(let version) = fields["version"], isValidHistorySegment(version) else {
+        throw SnapshotDecodeError(message: "record has an invalid version")
+    }
+    guard case .string(let snapshotPath) = fields["snapshotPath"],
+          snapshotPath.hasPrefix("/")
+    else {
+        throw SnapshotDecodeError(message: "record has an invalid snapshotPath")
+    }
+    guard case .string(let snapshotSha256) = fields["snapshotSha256"],
+          isValidSha256(snapshotSha256)
+    else {
+        throw SnapshotDecodeError(message: "record has an invalid snapshotSha256")
+    }
+    return HistoryRecord(
+        project: project,
+        version: version,
+        snapshotPath: snapshotPath,
+        snapshotSha256: snapshotSha256,
+        files: try decodeFiles(fields["files"]!))
 }
 
 // MARK: - Snapshot rendering
